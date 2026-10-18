@@ -12,7 +12,10 @@ booking plus simulated-payment flow using MariaDB and SQLAlchemy 2.x.
   confirmed-booking cancellation.
 - `checkout_routes.py` converts one valid reservation into a booking and
   simulated payment, including delayed settlement.
-- `models.py` defines Event, Seat, Reservation, Booking, and Payment.
+- `idempotency.py` validates client keys, hashes canonical request parameters,
+  and replays durable responses stored in MariaDB.
+- `models.py` defines the five booking-domain models and durable
+  `IdempotencyRecord` storage.
 - `database.py` configures the async SQLAlchemy engine/session using `asyncmy`.
 - `schema.py`, `migrate.py`, and `seed.py` initialize tables, add checkout
   uniqueness constraints, and seed demo inventory respectively.
@@ -25,28 +28,60 @@ route and constraint tests; it does not reproduce InnoDB row locking.
 
 ## Prerequisites
 
-- Python 3.14 or newer
+- Python 3.14 or newer, as declared by `pyproject.toml` and `uv.lock`
 - [uv](https://docs.astral.sh/uv/)
-- MariaDB 13.x for local development, or Docker Desktop with Docker Compose
+- For local execution: a reachable MariaDB server and a database/user with
+  privileges to apply this project's schema changes.
+- For container execution: Docker Engine or Docker Desktop with Docker Compose
+  v2 (`docker compose`). Compose uses the `mariadb:13.0.2` image.
 
-## Local setup with uv
+The repository does not pin a specific `uv`, Docker Desktop, or Compose version.
+Use versions that support the commands shown below.
 
-Install the locked dependencies:
+## Configuration
 
-```powershell
-uv sync --locked
-```
-
-Create the local environment file from the placeholder template and edit its
-database credentials. PowerShell:
+Copy the example environment file for local use and replace its placeholder
+credentials with values for your own database. PowerShell:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
+The application reads these names through Pydantic Settings:
+
+| Variable | Purpose | Application default |
+|---|---|---|
+| `DB_HOST` | MariaDB hostname | `127.0.0.1` |
+| `DB_PORT` | MariaDB TCP port | `3307` |
+| `DB_NAME` | Database name | `the_last_seat` |
+| `DB_USER` | Database user | Empty; configure a user |
+| `DB_PASSWORD` | Database password | Empty; configure a password |
+| `RESERVATION_HOLD_SECONDS` | Hold duration | `300` |
+
+The `.env.example` also has Compose-only variables: `MARIADB_ROOT_PASSWORD`
+sets the container database root password, and `DOCKER_DB_PORT` selects the
+host port published for the database (default `3308`). Compose reads these
+values for interpolation. The API container connects to Compose's database
+service hostname `db` on port `3306`; it does not use the host's published
+database port. When running the API directly on your computer, use the host
+database address and port instead (the example is `127.0.0.1:3307`).
+
+The application reads `.env` from its current working directory; explicit
+process environment variables take precedence. `.env` is ignored by Git and
+excluded from the Docker build context. Keep real credentials out of
+`.env.example` and source control.
+
+## Run locally
+
+Install the locked project and development dependencies:
+
+```powershell
+uv sync --locked
+```
+
 For a host-installed MariaDB, `.env` uses `127.0.0.1:3307`. Create the database
-and a least-privilege local user in a MariaDB client, replacing the example
-password before executing:
+and a least-privilege local user in a MariaDB client if they do not already
+exist. Replace the example password before executing:
 
 ```sql
 CREATE DATABASE the_last_seat;
@@ -55,44 +90,48 @@ GRANT ALL PRIVILEGES ON the_last_seat.* TO 'lastseat'@'localhost';
 ```
 
 If the database or user already exists, preserve it and adjust the grants as
-needed; do not drop or recreate an existing database. The application reads
-`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, and
-`RESERVATION_HOLD_SECONDS` from environment variables or `.env`. `.env` is
-ignored by Git and excluded from Docker builds. Never put real credentials in
-`.env.example`.
+needed; do not drop or recreate an existing database.
 
-Initialize missing tables and apply the safe, forward-only checkout migration:
+Initialize the database and seed demo inventory:
 
 ```powershell
 uv run --locked python -m codechef_task.migrate
-```
-
-The migration adds unique keys on `bookings.reservation_id` and
-`payments.booking_id`, and updates the booking status check to allow `pending`
-delayed bookings. It checks for duplicates before adding keys; it changes no
-booking rows and never drops tables or data. Existing confirmed/cancelled rows
-remain valid. SQLAlchemy `create_all()` creates missing tables but does not
-evolve existing ones; this small migration is for the current milestone. Use a
-versioned migration tool for subsequent schema evolution.
-
-Seed or complete the demo event inventory:
-
-```powershell
 uv run --locked python -m codechef_task.seed
 ```
 
-The seed operation is repeatable and creates exactly seat numbers 1–500 for
-`the-last-seat-demo` if that event has no out-of-range seats. It does not
-duplicate existing seats or delete data.
+The migration and seed behavior is described in [Database setup and
+migrations](#database-setup-and-migrations).
 
-## Run the API
+Start the API:
 
 ```powershell
 uv run --locked uvicorn codechef_task.app:app --reload
 ```
 
-The API listens at `http://127.0.0.1:8000`. Interactive API docs are at
-`/docs`.
+The API listens at `http://127.0.0.1:8000`; Swagger UI is at
+`http://127.0.0.1:8000/docs`.
+
+## Database setup and migrations
+
+Migrations are **not automatic** when the API starts. Run
+`uv run --locked python -m codechef_task.migrate` after configuring database
+access and before starting a new or updated deployment. The command first
+calls SQLAlchemy `create_all()` to create missing tables, including the
+`idempotency_records` table, then applies the repository's migration. It adds
+unique keys on `bookings.reservation_id` and
+`payments.booking_id`, and updates the booking status check to allow `pending`
+delayed bookings. It checks for duplicate values before adding keys. It does
+not drop tables or delete rows. `create_all()` does not evolve existing table
+layouts; this migration covers only schema changes currently implemented
+here. Later schema evolution will need a versioned migration process. Never
+use a database drop, volume deletion, or other destructive command as routine
+setup.
+
+The seed command creates or completes the `the-last-seat-demo` event with
+exactly seat numbers 1 to 500. It is repeatable, does not duplicate seats, and
+refuses to proceed if the event already has out-of-range seat numbers. It is
+optional for deployment; do not seed production unless demo inventory is
+intended.
 
 ## API endpoints
 
@@ -136,6 +175,15 @@ Content-Type: application/json
 {"seat_id":42}
 ```
 
+Optionally send `Idempotency-Key: <client-generated-key>` to retry safely if a
+client does not receive the response. Keys must be 1 to 128 characters, start
+with an ASCII letter or digit, and contain only letters, digits, periods,
+underscores, colons, or hyphens. A repeated key with the same
+event and seat returns the stored original response; reusing it with another
+event or seat returns HTTP 409. Without the header, existing seat-availability
+behavior is unchanged. Empty, malformed, or longer than 128-character keys
+return HTTP 422.
+
 HTTP 201 response:
 
 ```json
@@ -150,6 +198,16 @@ HTTP 201 response:
 ```
 
 Unknown event/seat returns 404. Closed events or unavailable seats return 409.
+
+PowerShell example (reuse the same `$headers` when retrying this logical
+request):
+
+```powershell
+$headers = @{ "Idempotency-Key" = [guid]::NewGuid().ToString() }
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/api/events/1/reservations" `
+  -Headers $headers -ContentType "application/json" -Body '{"seat_id":42}'
+```
 
 ### `GET /api/events/{event_id}/seats`
 
@@ -196,6 +254,13 @@ Content-Type: application/json
 
 {"outcome":"success"}
 ```
+
+This route also accepts the optional `Idempotency-Key` header with the same
+format. Invalid keys return HTTP 422. The request fingerprint includes the
+reservation ID and outcome. The same key and outcome replays the original
+response; changing the outcome with
+that key returns HTTP 409. Without a key, the existing one-checkout-per-
+reservation retry behavior remains in effect.
 
 Immediate outcomes are `success` and `failure`. Example HTTP 201 response for
 success:
@@ -275,11 +340,50 @@ Repeated cancellation returns the same record. The succeeded payment remains
 in history: cancellation does not issue a refund. Only confirmed bookings can
 be cancelled through this endpoint.
 
+## API verification and troubleshooting
+
+With the API running, check process and database health:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/health
+Invoke-RestMethod http://127.0.0.1:8000/health/db
+```
+
+The first endpoint verifies that the API responds; the second executes `SELECT
+1` against the configured database and returns HTTP 503 when unavailable.
+Open `http://127.0.0.1:8000/docs` for Swagger UI and interactive requests.
+Useful routes include `GET /api/events/{event_id}/seats`,
+`POST /api/events/{event_id}/reservations`,
+`POST /api/reservations/{reservation_id}/checkout`,
+`GET /api/reservations/{reservation_id}`, and
+`GET /api/events/{event_id}/bookings`; request and response examples are in
+[API endpoints](#api-endpoints).
+
+For a local seeded demo, `seed.py` creates the event in `draft` state and the
+reservation endpoint accepts only `open` events. There is no event-management
+API. To make only that local demo event bookable, update it using a MariaDB
+client after seeding:
+
+```sql
+UPDATE events SET status = 'open'
+WHERE slug = 'the-last-seat-demo' AND status = 'draft';
+```
+
+For connection failures, check that MariaDB is running and reachable at the
+configured host and port, verify `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`,
+and `DB_PASSWORD`, then retry `/health/db`. For migration errors, inspect the
+database error and user privileges; the migration can stop when duplicate
+values prevent a unique constraint. Preserve the data and resolve reported
+duplicates before retrying. If Uvicorn reports an occupied port, use
+`--port 8001` and browse to port 8001. For Docker-specific startup steps, see
+[Compose troubleshooting](#compose-troubleshooting).
+
 ## Schema, lifecycle, and concurrency
 
-The five models are shown in [docs/ERD.md](docs/ERD.md); the state and lock
-flow is shown in [docs/Booking-Workflow.md](docs/Booking-Workflow.md). Money
-uses `NUMERIC(10, 2)`. Times use UTC. Composite seat foreign keys ensure a
+The five booking-domain models plus the idempotency record are shown in
+[docs/ERD.md](docs/ERD.md); the state and lock flow is shown in
+[docs/Booking-Workflow.md](docs/Booking-Workflow.md). Money uses
+`NUMERIC(10, 2)`. Times use UTC. Composite seat foreign keys ensure a
 reservation or booking points to a seat belonging to the same event.
 
 Reservation states are `active`, `converted`, `expired`, and `cancelled`.
@@ -296,9 +400,11 @@ Expiry is lazy: an API operation processes an elapsed hold; there is no expiry
 worker. Until a request touches an expired hold, its stored status can remain
 `active`, but reservation/checkout paths compare `expires_at` before proceeding.
 
-Every reservation and checkout mutation locks the concrete seat row with
-`SELECT ... FOR UPDATE`, then locks the reservation. The lock serializes
-writers for that seat in InnoDB. Checkout writes booking, payment, and
+For keyed reservation and checkout requests, the transaction first attempts
+to insert its `(operation, key)` record. It then follows the same business
+lock order as an unkeyed request: lock the concrete seat row with
+`SELECT ... FOR UPDATE`, then lock the reservation. The seat lock serializes
+business writers for that seat in InnoDB. Checkout writes booking, payment, and
 reservation state inside one transaction, so an error rolls back all of them.
 Database unique constraints back up application checks:
 
@@ -310,11 +416,25 @@ Database unique constraints back up application checks:
 - Unique `payments.booking_id` permits one payment row per booking.
 - `(event_id, seat_number)` prevents repeated seat numbers within an event.
 
-The checkout idempotency scope is the reservation: the first outcome persists,
-and repeated or concurrent requests return the stored payment and booking.
-There is one attempt per reservation; a failed payment is terminal and a retry
-requires a new reservation. A delayed outcome is resolved by an explicit later
-settlement request; it does not sleep in a request or create an untracked task.
+The existing checkout rule permits one attempt per reservation; a failed
+payment is terminal and another attempt requires a new reservation. Explicit
+idempotency responses have a durable `(operation, key)` scope: reservation
+creation and checkout use distinct operation names, and fingerprints include
+the path identifiers and relevant request fields. Since authentication is not
+implemented, keys are global per operation across all callers. Clients should
+generate globally unique keys (UUIDs are suitable) and must not reuse a key for
+another caller's request. A key reused with different logical parameters
+returns HTTP 409. Different keys still pass through seat locks and the existing
+database uniqueness constraints. Concurrent requests with the same key wait
+on the database unique constraint and replay the committed response. The
+business mutation and successful response record commit atomically; failed or
+transient requests do not leave a cached result. Requests without a key retain
+the prior behavior. In particular, checkout with a new key after an earlier
+checkout still returns the original booking/payment under the reservation's
+existing one-attempt rule. Idempotency records currently have no retention or
+cleanup policy and remain stored indefinitely. A delayed outcome is resolved
+by an explicit later settlement request; it does not sleep in a request or
+create an untracked task.
 This is a deterministic simulator, not payment provider integration, and it
 does not create an external charge.
 
@@ -343,7 +463,26 @@ Copy-Item .env.example .env
 # Edit .env and replace all placeholder credentials.
 docker compose up --build -d
 docker compose ps
+docker compose logs -f api
 ```
+
+This starts `api` and `db`. The API container starts Uvicorn using the Dockerfile
+command and waits for MariaDB's configured health check. The API connects to
+`db:3306`; host access to the database is published on `127.0.0.1:3308` by
+default. The API is published at `127.0.0.1:8000`. The API service does not
+have a Compose health check configured; use the application health endpoints
+to verify it.
+
+After code changes, rebuild and recreate the API image with:
+
+```powershell
+docker compose up --build -d
+docker compose ps
+docker compose logs -f api
+```
+
+Inspect service status or logs at any time with `docker compose ps`,
+`docker compose logs -f api`, or `docker compose logs -f db`.
 
 Initialize schema and apply the checkout migration, then seed the demo event:
 
@@ -352,9 +491,10 @@ docker compose exec api python -m codechef_task.migrate
 docker compose exec api python -m codechef_task.seed
 ```
 
-Check `http://127.0.0.1:8000/health` and `/health/db`. The database can be
-reached from the host on `127.0.0.1:3308` by default; containers use `db:3306`.
-To stop the services while preserving the named database volume:
+Check `http://127.0.0.1:8000/health` and
+`http://127.0.0.1:8000/health/db`. The database can be reached from the host
+on `127.0.0.1:3308` by default; containers use `db:3306`. To stop the services
+while preserving the named database volume:
 
 ```powershell
 docker compose down
@@ -363,6 +503,93 @@ docker compose down
 Do not use `docker compose down -v` if you need to keep the container database.
 The MariaDB image initializes credentials/database only for a new empty data
 volume; changing `.env` later does not rewrite existing database users.
+The Compose file was inspected, but the instructions below do not assert that
+the stack has been started or runtime-tested in this environment.
+
+### Compose troubleshooting
+
+- If a port is occupied, local Uvicorn accepts another port, for example
+  `uv run --locked uvicorn codechef_task.app:app --port 8001`. Compose publishes
+  the API's host port as `8000`; change the host side of `8000:8000` in a local
+  Compose override if that port is occupied. The database host port is
+  configurable with `DOCKER_DB_PORT` (for example `3309`).
+- If `docker compose up` cannot reach the daemon, start Docker Desktop (Windows)
+  or the Docker Engine service, then retry `docker compose ps`.
+- If the API starts before the database is healthy or cannot connect, check
+  `docker compose ps` and `docker compose logs -f db`; confirm the API uses
+  `DB_HOST=db` and `DB_PORT=3306` inside Compose. Never set the API container's
+  database host to `127.0.0.1`, which points back to the API container.
+- If MariaDB credentials or the database name are wrong, check `DB_NAME`,
+  `DB_USER`, `DB_PASSWORD`, and `MARIADB_ROOT_PASSWORD` in the local `.env`.
+  These initialization values are applied when the named volume is first
+  created; changing them later does not rewrite accounts in an existing volume.
+- If migration fails, inspect the API container output and MariaDB logs. Check
+  database reachability and privileges, and resolve any duplicate values the
+  migration reports before retrying. Do not delete the volume to bypass a
+  migration error.
+
+## Production deployment instructions
+
+The repository contains a Dockerfile for the API and a Compose setup for local
+API plus MariaDB development. No hosting provider or public deployment URL is
+configured here; the public URL will be added after deployment. The Docker
+image uses the startup command
+`uvicorn codechef_task.app:app --host 0.0.0.0 --port 8000`, so configure the
+hosting platform to route traffic to container port `8000`. No `PORT`
+environment variable is currently read by the application. The platform's
+HTTPS ingress should terminate TLS and forward traffic to the container over
+its private network.
+
+For a Docker-capable host, build from this repository's `Dockerfile` and run
+the image as the API service. Configure `DB_HOST`, `DB_PORT`, `DB_NAME`,
+`DB_USER`, `DB_PASSWORD`, and, when needed, `RESERVATION_HOLD_SECONDS` through
+the provider's secret/environment settings. `DB_HOST` and `DB_PORT` must point
+to a MariaDB-compatible TCP endpoint reachable from the API container. For a
+hosted database, use the provider's private host and port, not `127.0.0.1`.
+`MARIADB_ROOT_PASSWORD` and `DOCKER_DB_PORT` are used by this repository's
+Compose database service; they are not API settings for an independently
+managed production database.
+
+Run `python -m codechef_task.migrate` as a one-off deployment task/container
+using the same application image and database environment before routing user
+traffic. The API does not apply migrations on startup. Only run
+`python -m codechef_task.seed` if the demo event and inventory are wanted; the
+seeded event is draft, and production event provisioning is not exposed as an
+API. The migration currently creates missing tables and applies this project's
+small explicit updates; later schema changes will need a maintained,
+versioned migration process.
+
+Use `/health` as a process/liveness check and `/health/db` as a database
+readiness check. The latter executes a query. These endpoints exist in the
+application, but Compose configures a health check only for MariaDB; configure
+the hosting platform's API health probes separately. The repository does not
+configure provider networking, HTTPS, domains, secrets storage, database
+firewall rules, backups, or restore procedures. Keep those settings in the
+hosting provider, restrict database access to the API service, and use secure
+secret storage. Use a persistent hosted MariaDB service with backups; the
+Compose named volume is for the local Compose environment and is not a
+production backup plan.
+
+The API can be demonstrated directly through its Swagger UI at
+`https://<your-deployed-host>/docs` once the provider assigns a URL; there is
+no custom frontend. Replace this placeholder with the real public URL after
+deployment. This documentation does not claim the service is deployed or
+production-ready: authentication/ownership checks, event administration,
+refunds, real payment processing, and automatic expiry remain unimplemented.
+
+### Pre-deployment checklist
+
+- [ ] The full test suite passes.
+- [ ] No `.env` file, credentials, or other secrets are committed.
+- [ ] The database migration has been applied and reviewed for the target data.
+- [ ] Production environment variables are configured in secure provider
+      settings.
+- [ ] The database is reachable from the API service over its configured
+      private TCP endpoint.
+- [ ] `/health` and `/health/db` return the expected responses.
+- [ ] Swagger UI and representative seat, reservation, checkout, and history
+      workflows have been tested.
+- [ ] Persistent database storage, backups, and a restore approach are planned.
 
 ## Tests
 

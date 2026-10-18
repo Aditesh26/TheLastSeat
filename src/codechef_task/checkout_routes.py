@@ -4,13 +4,21 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Response, status
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from codechef_task.database import get_db_session
+from codechef_task.idempotency import (
+    CachedResponse,
+    claim_idempotency_key,
+    read_after_duplicate,
+    request_fingerprint,
+    store_response,
+    validate_idempotency_key,
+)
 from codechef_task.models import (
     Booking,
     BookingStatus,
@@ -75,18 +83,33 @@ async def checkout_reservation(
     payload: CheckoutRequest,
     response: Response,
     reservation_id: int = Path(gt=0),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     session: AsyncSession = Depends(get_db_session),
 ) -> CheckoutRead:
     """Convert an active hold and record one simulated payment atomically."""
+    validate_idempotency_key(idempotency_key)
+    fingerprint = request_fingerprint(
+        reservation_id=reservation_id, outcome=payload.outcome
+    )
     event_id, seat_id = await _read_reservation_location(session, reservation_id)
     result: CheckoutRead | None = None
+    cached_response: CachedResponse | None = None
+    idempotency_record = None
     conflict: str | None = None
     replayed = False
 
     try:
         async with session.begin():
-            # Share the reservation lifecycle's seat-first lock order. The seat
-            # is the mutex for checkout, cancellation, expiry, and new holds.
+            if idempotency_key is not None:
+                idempotency_record = await claim_idempotency_key(
+                    session,
+                    operation="reservation.checkout",
+                    key=idempotency_key,
+                    fingerprint=fingerprint,
+                )
+
+            # After claiming a fresh key, use the established seat-first
+            # lock protocol. A duplicate key is resolved after rollback below.
             seat = await session.scalar(
                 select(Seat)
                 .where(Seat.event_id == event_id, Seat.id == seat_id)
@@ -178,9 +201,31 @@ async def checkout_reservation(
                     session.add(payment)
                     await session.flush()
                     result = _checkout_response(booking, payment)
+
+            if conflict is not None and idempotency_record is not None:
+                await session.delete(idempotency_record)
+            elif result is not None:
+                response_status = (
+                    status.HTTP_200_OK if replayed else status.HTTP_201_CREATED
+                )
+                store_response(
+                    idempotency_record,
+                    status_code=response_status,
+                    body=result.model_dump(mode="json"),
+                )
     except IntegrityError:
         # Any failed insert rolls back the reservation transition and its
         # booking/payment rows together.
+        if idempotency_key is not None:
+            cached_response = await read_after_duplicate(
+                session,
+                operation="reservation.checkout",
+                key=idempotency_key,
+                fingerprint=fingerprint,
+            )
+            if cached_response is not None:
+                response.status_code = cached_response.status_code
+                return CheckoutRead.model_validate(cached_response.body)
         raise HTTPException(status_code=409, detail="Checkout could not be completed") from None
 
     if conflict is not None:

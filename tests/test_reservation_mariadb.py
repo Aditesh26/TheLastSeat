@@ -9,7 +9,15 @@ from sqlalchemy import delete, func, select, text
 
 from codechef_task.app import app
 from codechef_task.database import SessionLocal, engine
-from codechef_task.models import Booking, Event, EventStatus, Payment, Reservation, Seat
+from codechef_task.models import (
+    Booking,
+    Event,
+    EventStatus,
+    IdempotencyRecord,
+    Payment,
+    Reservation,
+    Seat,
+)
 from codechef_task.migrate import apply_checkout_constraints
 from codechef_task.schema import initialize_schema
 
@@ -33,15 +41,34 @@ def test_concurrent_reservations_are_safe_on_mariadb() -> None:
                             "SELECT TABLE_NAME, ENGINE "
                             "FROM information_schema.TABLES "
                             "WHERE TABLE_SCHEMA = DATABASE() "
-                            "AND TABLE_NAME IN ('seats', 'reservations')"
+                            "AND TABLE_NAME IN ('seats', 'reservations', "
+                            "'idempotency_records')"
                         )
                     )
                 ).all()
             )
         assert table_engines.get("seats", "").lower() == "innodb"
         assert table_engines.get("reservations", "").lower() == "innodb"
+        assert table_engines.get("idempotency_records", "").lower() == "innodb"
+        async with engine.connect() as connection:
+            key_index_columns = list(
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT COLUMN_NAME, NON_UNIQUE "
+                            "FROM information_schema.STATISTICS "
+                            "WHERE TABLE_SCHEMA = DATABASE() "
+                            "AND TABLE_NAME = 'idempotency_records' "
+                            "AND INDEX_NAME = 'uq_idempotency_operation_key' "
+                            "ORDER BY SEQ_IN_INDEX"
+                        )
+                    )
+                ).all()
+            )
+        assert key_index_columns == [("operation", 0), ("key", 0)]
 
         event_id: int | None = None
+        test_keys: list[str] = []
         try:
             async with SessionLocal() as session:
                 event = Event(
@@ -54,7 +81,7 @@ def test_concurrent_reservations_are_safe_on_mariadb() -> None:
                 session.add(event)
                 await session.flush()
                 event_id = event.id
-                seats = [Seat(event_id=event.id, seat_number=n) for n in range(1, 9)]
+                seats = [Seat(event_id=event.id, seat_number=n) for n in range(1, 10)]
                 session.add_all(seats)
                 await session.flush()
                 now = datetime.now(UTC)
@@ -118,6 +145,48 @@ def test_concurrent_reservations_are_safe_on_mariadb() -> None:
                     ),
                 )
                 assert sorted(response.status_code for response in same_seat) == [201, 409]
+
+                # MariaDB's unique-key wait resolves concurrent identical
+                # idempotency claims to the same durable reservation response.
+                reservation_key = f"mariadb-reserve-{uuid4().hex}"
+                test_keys.append(reservation_key)
+                same_key_reservations = await asyncio.gather(
+                    client.post(
+                        f"/api/events/{event_id}/reservations",
+                        json={"seat_id": seat_ids[8]},
+                        headers={"Idempotency-Key": reservation_key},
+                    ),
+                    client.post(
+                        f"/api/events/{event_id}/reservations",
+                        json={"seat_id": seat_ids[8]},
+                        headers={"Idempotency-Key": reservation_key},
+                    ),
+                )
+                assert [response.status_code for response in same_key_reservations] == [
+                    201,
+                    201,
+                ]
+                assert same_key_reservations[0].json() == same_key_reservations[1].json()
+                keyed_reservation_id = same_key_reservations[0].json()["id"]
+                checkout_key = f"mariadb-checkout-{uuid4().hex}"
+                test_keys.append(checkout_key)
+                same_key_checkouts = await asyncio.gather(
+                    client.post(
+                        f"/api/reservations/{keyed_reservation_id}/checkout",
+                        json={"outcome": "success"},
+                        headers={"Idempotency-Key": checkout_key},
+                    ),
+                    client.post(
+                        f"/api/reservations/{keyed_reservation_id}/checkout",
+                        json={"outcome": "success"},
+                        headers={"Idempotency-Key": checkout_key},
+                    ),
+                )
+                assert [response.status_code for response in same_key_checkouts] == [
+                    201,
+                    201,
+                ]
+                assert same_key_checkouts[0].json() == same_key_checkouts[1].json()
 
                 different_seats = await asyncio.gather(
                     client.post(
@@ -252,10 +321,35 @@ def test_concurrent_reservations_are_safe_on_mariadb() -> None:
                     select(func.count(Payment.id)).where(Payment.id == payment_id)
                 )
                 assert delayed_booking_count == delayed_payment_count == 1
+                keyed_reservation_count = await session.scalar(
+                    select(func.count(Reservation.id)).where(
+                        Reservation.id == keyed_reservation_id
+                    )
+                )
+                keyed_booking_count = await session.scalar(
+                    select(func.count(Booking.id)).where(
+                        Booking.reservation_id == keyed_reservation_id
+                    )
+                )
+                keyed_payment_count = await session.scalar(
+                    select(func.count(Payment.id)).where(
+                        Payment.booking_id
+                        == same_key_checkouts[0].json()["booking_id"]
+                    )
+                )
+                assert keyed_reservation_count == 1
+                assert keyed_booking_count == keyed_payment_count == 1
         finally:
-            if event_id is not None:
+            if event_id is not None or test_keys:
                 async with SessionLocal.begin() as session:
-                    await session.execute(delete(Event).where(Event.id == event_id))
+                    if event_id is not None:
+                        await session.execute(delete(Event).where(Event.id == event_id))
+                    if test_keys:
+                        await session.execute(
+                            delete(IdempotencyRecord).where(
+                                IdempotencyRecord.key.in_(test_keys)
+                            )
+                        )
             await engine.dispose()
 
     asyncio.run(scenario())

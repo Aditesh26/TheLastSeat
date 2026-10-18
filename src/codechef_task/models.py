@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 
 from sqlalchemy import (
     CHAR,
@@ -13,6 +14,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    JSON,
     Numeric,
     String,
     UniqueConstraint,
@@ -239,4 +241,29 @@ class Payment(Base):
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
+    )
+
+
+class IdempotencyRecord(Base):
+    """Durable successful response for one client request key and operation."""
+
+    __tablename__ = "idempotency_records"
+    __table_args__ = (
+        UniqueConstraint("operation", "key", name="uq_idempotency_operation_key"),
+        Index("ix_idempotency_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    operation: Mapped[str] = mapped_column(String(32), nullable=False)
+    key: Mapped[str] = mapped_column(
+        String(128).with_variant(
+            String(128, collation="utf8mb4_bin"), "mysql"
+        ),
+        nullable=False,
+    )
+    request_fingerprint: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    response_status: Mapped[int | None] = mapped_column(Integer)
+    response_body: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )

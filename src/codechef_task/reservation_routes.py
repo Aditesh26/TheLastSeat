@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Path, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -10,6 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from codechef_task.config import settings
 from codechef_task.database import get_db_session
+from codechef_task.idempotency import (
+    CachedResponse,
+    claim_idempotency_key,
+    read_after_duplicate,
+    request_fingerprint,
+    store_response,
+    validate_idempotency_key,
+)
 from codechef_task.models import (
     Booking,
     BookingStatus,
@@ -147,14 +155,28 @@ async def _lock_reservation_and_seat(
 )
 async def create_reservation(
     payload: ReservationCreate,
+    http_response: Response,
     event_id: int = Path(gt=0),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     session: AsyncSession = Depends(get_db_session),
 ) -> ReservationRead:
     """Temporarily hold an available seat, serializing attempts on its seat row."""
+    validate_idempotency_key(idempotency_key)
+    fingerprint = request_fingerprint(event_id=event_id, seat_id=payload.seat_id)
     response: ReservationRead | None = None
+    cached_response: CachedResponse | None = None
+    idempotency_record = None
     conflict: str | None = None
     try:
         async with session.begin():
+            if idempotency_key is not None:
+                idempotency_record = await claim_idempotency_key(
+                    session,
+                    operation="reservation.create",
+                    key=idempotency_key,
+                    fingerprint=fingerprint,
+                )
+
             # This existing InnoDB row is the mutex for this event/seat. Every
             # reservation lifecycle operation locks it before touching a hold.
             seat = await session.scalar(
@@ -173,8 +195,7 @@ async def create_reservation(
                 )
 
             # This is the first consistent read in the transaction, after any
-            # wait for the seat lock, so it observes state committed by the
-            # request that held the lock before us.
+            # wait for the seat lock, so it observes committed state.
             event = await session.scalar(select(Event).where(Event.id == event_id))
             if event is None:
                 raise HTTPException(status_code=404, detail="Event not found")
@@ -221,9 +242,29 @@ async def create_reservation(
                 session.add(reservation)
                 await session.flush()
                 await session.refresh(reservation)
-                response = _reservation_response(reservation)
+                reservation_response = _reservation_response(reservation)
+                store_response(
+                    idempotency_record,
+                    status_code=status.HTTP_201_CREATED,
+                    body=reservation_response.model_dump(mode="json"),
+                )
+                response = reservation_response
+            elif idempotency_record is not None:
+                # Business conflicts are not cached; a later retry may be
+                # valid after inventory changes.
+                await session.delete(idempotency_record)
     except IntegrityError:
         # The context manager has rolled back before this handler is reached.
+        if idempotency_key is not None:
+            cached_response = await read_after_duplicate(
+                session,
+                operation="reservation.create",
+                key=idempotency_key,
+                fingerprint=fingerprint,
+            )
+            if cached_response is not None:
+                http_response.status_code = cached_response.status_code
+                return ReservationRead.model_validate(cached_response.body)
         raise HTTPException(
             status_code=409, detail="Seat is no longer available"
         ) from None

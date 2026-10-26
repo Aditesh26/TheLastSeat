@@ -72,8 +72,11 @@ registration number in `X-User-Ref`. Surrounding whitespace is trimmed and
 letters are uppercased; values must contain 6–20 ASCII letters or digits. For
 owned rows, mutations verify the owner after acquiring their existing seat-
 first locks; no additional row locks are taken. A mismatch or NULL owner returns
-403. Legacy NULL-owner rows remain unassigned and are never claimed. Event-wide
-booking history is disabled until authenticated staff authorization exists.
+403. Legacy NULL-owner rows remain unassigned and are never claimed. The
+original event-wide history path is disabled with 403; the demo route
+`GET /api/events/{event_id}/bookings/all` returns all event booking/payment
+records without authentication and must only be used with non-sensitive demo
+data.
 This header is caller-controlled identification, not authentication. Idempotency
 fingerprints include the normalized caller reference, so a different reference
 cannot replay a keyed reservation or checkout response.

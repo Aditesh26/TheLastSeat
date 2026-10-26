@@ -34,6 +34,8 @@ from codechef_task.models import (
     Seat,
 )
 
+LOAD_TEST_USER_REF = "LOADTEST01"
+
 
 @dataclass
 class Result:
@@ -285,7 +287,7 @@ async def run(args: argparse.Namespace) -> int:
         event_id, slug, seat_ids = await create_test_event(args.seats)
         async with httpx.AsyncClient(
             base_url=args.base_url,
-            headers={"X-User-Ref": "load-test"},
+            headers={"X-User-Ref": LOAD_TEST_USER_REF},
             timeout=httpx.Timeout(30),
             limits=httpx.Limits(max_connections=args.concurrency),
             trust_env=False,

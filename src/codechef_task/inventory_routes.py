@@ -63,6 +63,11 @@ class BookingHistoryItem(BaseModel):
     payment: PaymentHistoryRead | None
 
 
+class EventBookingHistoryRead(BaseModel):
+    event_id: int
+    items: list[BookingHistoryItem]
+
+
 class UserBookingHistoryRead(BaseModel):
     items: list[BookingHistoryItem]
 
@@ -175,6 +180,7 @@ async def list_event_seats(
     )
 
 
+# Keep the original path denied until it can be protected by real staff auth.
 @router.get(
     "/api/events/{event_id}/bookings",
     status_code=403,
@@ -194,6 +200,36 @@ async def list_event_bookings(
     raise HTTPException(
         status_code=403,
         detail="Event-wide booking history is unavailable without authenticated access",
+    )
+
+
+@router.get(
+    "/api/events/{event_id}/bookings/all",
+    response_model=EventBookingHistoryRead,
+)
+async def list_all_event_bookings(
+    event_id: int = Path(gt=0),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_db_session),
+) -> EventBookingHistoryRead:
+    """Return every booking and payment for an event without authentication."""
+    if await session.scalar(select(Event.id).where(Event.id == event_id)) is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+    await session.commit()
+    rows = (
+        await session.execute(
+            select(Booking, Payment)
+            .outerjoin(Payment, Payment.booking_id == Booking.id)
+            .where(Booking.event_id == event_id)
+            .order_by(Booking.created_at.desc(), Booking.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return EventBookingHistoryRead(
+        event_id=event_id,
+        items=[_booking_item(booking, payment) for booking, payment in rows],
     )
 
 

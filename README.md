@@ -51,15 +51,15 @@ Copy-Item .env.example .env
 
 The application reads these names through Pydantic Settings:
 
-| Variable | Purpose | Application default |
-|---|---|---|
-| `DB_HOST` | MariaDB hostname | `127.0.0.1` |
-| `DB_PORT` | MariaDB TCP port | `3307` |
-| `DB_NAME` | Database name | `the_last_seat` |
-| `DB_USER` | Database user | Empty; configure a user |
-| `DB_PASSWORD` | Database password | Empty; configure a password |
-| `RESERVATION_HOLD_SECONDS` | Hold duration | `300` |
-| `LOG_LEVEL` | Application log threshold (`DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`) | `INFO` |
+| Variable                   | Purpose                                                                        | Application default         |
+| -------------------------- | ------------------------------------------------------------------------------ | --------------------------- |
+| `DB_HOST`                  | MariaDB hostname                                                               | `127.0.0.1`                 |
+| `DB_PORT`                  | MariaDB TCP port                                                               | `3307`                      |
+| `DB_NAME`                  | Database name                                                                  | `the_last_seat`             |
+| `DB_USER`                  | Database user                                                                  | Empty; configure a user     |
+| `DB_PASSWORD`              | Database password                                                              | Empty; configure a password |
+| `RESERVATION_HOLD_SECONDS` | Hold duration                                                                  | `300`                       |
+| `LOG_LEVEL`                | Application log threshold (`DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`) | `INFO`                      |
 
 The `.env.example` also has Compose-only variables: `MARIADB_ROOT_PASSWORD`
 sets the container database root password, and `DOCKER_DB_PORT` selects the
@@ -149,7 +149,7 @@ GET /health
 ```
 
 ```json
-{"status":"healthy"}
+{ "status": "healthy" }
 ```
 
 ### `GET /health/db`
@@ -157,14 +157,14 @@ GET /health
 Runs `SELECT 1`. On success:
 
 ```json
-{"status":"healthy","database":"available"}
+{ "status": "healthy", "database": "available" }
 ```
 
 Request: `GET /health/db`. When the database is unavailable, it returns HTTP
 503 with this generic response:
 
 ```json
-{"detail":{"status":"unhealthy","database":"unavailable"}}
+{ "detail": { "status": "unhealthy", "database": "unavailable" } }
 ```
 
 Credentials and internal exception details are not returned.
@@ -261,9 +261,9 @@ Example response:
 {
   "event_id": 1,
   "seats": [
-    {"seat_id": 12, "seat_number": 1, "status": "available"},
-    {"seat_id": 13, "seat_number": 2, "status": "reserved"},
-    {"seat_id": 14, "seat_number": 3, "status": "booked"}
+    { "seat_id": 12, "seat_number": 1, "status": "available" },
+    { "seat_id": 13, "seat_number": 2, "status": "reserved" },
+    { "seat_id": 14, "seat_number": 3, "status": "booked" }
   ]
 }
 ```
@@ -355,6 +355,11 @@ identity with which to authorize access to other students' booking and payment
 details. Use `/api/users/me/bookings` for records matching the supplied
 registration-number reference. That header is caller-controlled and does not
 prove identity.
+
+For the recruitment demo, `GET /api/events/{event_id}/bookings/all` returns the
+paginated event-wide booking and payment history. It requires no header or
+authentication and exposes every booking's IDs, statuses, amounts, and payment
+details; use it only with non-sensitive demo data.
 
 ### `GET /api/users/me/bookings`
 

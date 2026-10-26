@@ -99,6 +99,14 @@ def test_seat_status_booking_history_and_confirmed_booking_cancellation() -> Non
                 history = await client.get(f"/api/events/{event_id}/bookings")
                 assert history.status_code == 403
 
+                all_history = await client.get(
+                    f"/api/events/{event_id}/bookings/all"
+                )
+                assert all_history.status_code == 200
+                assert all_history.json()["event_id"] == event_id
+                assert len(all_history.json()["items"]) == 1
+                assert all_history.json()["items"][0]["payment"]["status"] == "succeeded"
+
                 history = await client.get("/api/users/me/bookings")
                 assert history.status_code == 200
                 assert len(history.json()["items"]) == 1
@@ -126,6 +134,10 @@ def test_seat_status_booking_history_and_confirmed_booking_cancellation() -> Non
                 assert after_booking_cancel.json()["seats"][2]["status"] == "available"
                 history_after_cancel = await client.get("/api/users/me/bookings")
                 assert history_after_cancel.json()["items"][0]["status"] == "cancelled"
+                all_history_after_cancel = await client.get(
+                    f"/api/events/{event_id}/bookings/all"
+                )
+                assert all_history_after_cancel.json()["items"][0]["status"] == "cancelled"
 
                 reallocated = await client.post(
                     f"/api/events/{event_id}/reservations",

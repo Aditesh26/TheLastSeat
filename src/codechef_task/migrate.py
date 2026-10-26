@@ -12,6 +12,29 @@ _UNIQUE_KEYS = (
     ("bookings", "reservation_id", "uq_bookings_reservation_id"),
     ("payments", "booking_id", "uq_payments_booking_id"),
 )
+_USER_REF_COLUMNS = ("reservations", "bookings")
+
+
+async def apply_user_ref_columns(target_engine: AsyncEngine = engine) -> None:
+    """Add nullable ownership columns without changing or backfilling old rows."""
+    async with target_engine.begin() as connection:
+        for table in _USER_REF_COLUMNS:
+            present = await connection.execute(
+                text(
+                    "SELECT COUNT(*) FROM information_schema.COLUMNS "
+                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table "
+                    "AND COLUMN_NAME = 'user_ref'"
+                ),
+                {"table": table},
+            )
+            if present.scalar_one():
+                continue
+            await connection.execute(
+                text(
+                    f"ALTER TABLE `{table}` ADD COLUMN `user_ref` "
+                    "VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL"
+                )
+            )
 
 
 async def apply_checkout_constraints(target_engine: AsyncEngine = engine) -> None:
@@ -92,6 +115,7 @@ async def apply_checkout_constraints(target_engine: AsyncEngine = engine) -> Non
 async def main() -> None:
     await initialize_schema(engine)
     await apply_checkout_constraints(engine)
+    await apply_user_ref_columns(engine)
     await engine.dispose()
 
 

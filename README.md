@@ -8,12 +8,14 @@ booking plus simulated-payment flow using MariaDB and SQLAlchemy 2.x.
 
 - `src/codechef_task/app.py` creates the FastAPI application and health routes.
 - `reservation_routes.py` handles holds, reservation retrieval, and cancellation.
-- `inventory_routes.py` lists seat availability, event booking history, and
-  confirmed-booking cancellation.
+- `inventory_routes.py` lists seat availability, event and caller booking
+  history, and confirmed-booking cancellation.
 - `checkout_routes.py` converts one valid reservation into a booking and
   simulated payment, including delayed settlement.
 - `idempotency.py` validates client keys, hashes canonical request parameters,
   and replays durable responses stored in MariaDB.
+- `user_identity.py` validates the required caller reference for lightweight
+  ownership checks; it does not authenticate callers.
 - `models.py` defines the five booking-domain models and durable
   `IdempotencyRecord` storage.
 - `database.py` configures the async SQLAlchemy engine/session using `asyncmy`.
@@ -122,7 +124,9 @@ calls SQLAlchemy `create_all()` to create missing tables, including the
 unique keys on `bookings.reservation_id` and
 `payments.booking_id`, and updates the booking status check to allow `pending`
 delayed bookings. It checks for duplicate values before adding keys. It does
-not drop tables or delete rows. `create_all()` does not evolve existing table
+not drop tables or delete rows. It also adds nullable `user_ref` columns to
+`reservations` and `bookings` when absent, preserving old rows with NULL values.
+`create_all()` does not evolve existing table
 layouts; this migration covers only schema changes currently implemented
 here. Later schema evolution will need a versioned migration process. Never
 use a database drop, volume deletion, or other destructive command as routine
@@ -174,6 +178,7 @@ value in `X-Request-ID`. Each request produces one access log with method,
 path (without query parameters), status, and duration. The request ID is
 included in log records, along with lifecycle entries for reservation
 creation, expiry and cancellation, checkout, and delayed-payment settlement.
+Those lifecycle records include `user_ref` alongside their existing entity IDs.
 Unexpected exceptions include a traceback in server logs and return a generic
 HTTP 500 response; expected HTTP errors retain their normal status and detail.
 Request bodies, query strings, credentials, database URLs, tokens, and payment
@@ -185,12 +190,24 @@ to change the threshold. Docker Compose passes the same variable to the API
 container and defaults it to `INFO`. Lower thresholds can produce more output;
 use `INFO` for normal operation.
 
+### Caller reference and ownership
+
+Reservation creation, reservation retrieval/cancellation, checkout, delayed
+payment settlement, and `GET /api/users/me/bookings` require `X-User-Ref`.
+Values must contain 1–64 ASCII letters, digits, periods, underscores, colons,
+or hyphens; missing or invalid values return HTTP 422. This caller-supplied
+value supports lightweight ownership filtering only; it is **not
+authentication**. A different non-NULL stored owner returns HTTP 403. Legacy
+reservations and bookings with NULL ownership remain accessible to any caller
+with a valid header. Owner comparisons are exact and case-sensitive.
+
 ### `POST /api/events/{event_id}/reservations`
 
 Creates a temporary hold for an available seat in an open event:
 
 ```http
 POST /api/events/1/reservations
+X-User-Ref: alice-demo
 Content-Type: application/json
 
 {"seat_id":42}
@@ -200,9 +217,9 @@ Optionally send `Idempotency-Key: <client-generated-key>` to retry safely if a
 client does not receive the response. Keys must be 1 to 128 characters, start
 with an ASCII letter or digit, and contain only letters, digits, periods,
 underscores, colons, or hyphens. A repeated key with the same
-event and seat returns the stored original response; reusing it with another
-event or seat returns HTTP 409. Without the header, existing seat-availability
-behavior is unchanged. Empty, malformed, or longer than 128-character keys
+event, seat, and caller reference returns the stored original response; reusing
+it with another caller or request returns HTTP 409. Without the key header,
+existing seat-availability behavior is unchanged. Empty, malformed, or longer than 128-character keys
 return HTTP 422.
 
 HTTP 201 response:
@@ -224,7 +241,10 @@ PowerShell example (reuse the same `$headers` when retrying this logical
 request):
 
 ```powershell
-$headers = @{ "Idempotency-Key" = [guid]::NewGuid().ToString() }
+$headers = @{
+  "X-User-Ref" = "alice-demo"
+  "Idempotency-Key" = [guid]::NewGuid().ToString()
+}
 Invoke-RestMethod -Method Post `
   -Uri "http://127.0.0.1:8000/api/events/1/reservations" `
   -Headers $headers -ContentType "application/json" -Body '{"seat_id":42}'
@@ -255,7 +275,8 @@ request can still lose a race and return 409. Unknown event returns 404.
 
 Example request: `GET /api/reservations/17`. Returns HTTP 200 and the
 reservation shape shown in the creation example, lazily persisting `expired`
-when the hold deadline has passed. Unknown reservation returns 404.
+when the hold deadline has passed. A different non-NULL owner returns 403;
+unknown reservation returns 404.
 
 ### `DELETE /api/reservations/{reservation_id}`
 
@@ -263,6 +284,7 @@ Example request: `DELETE /api/reservations/17`. Cancels an active hold and
 returns HTTP 200 with the updated reservation shape shown above (with `status`
 set to `cancelled`). A terminal or expired hold returns 409. Cancellation does
 not delete reservation history.
+A different non-NULL owner returns 403.
 
 ### `POST /api/reservations/{reservation_id}/checkout`
 
@@ -271,6 +293,7 @@ only a simulated outcome; price and currency are loaded from the event:
 
 ```http
 POST /api/reservations/17/checkout
+X-User-Ref: alice-demo
 Content-Type: application/json
 
 {"outcome":"success"}
@@ -278,8 +301,9 @@ Content-Type: application/json
 
 This route also accepts the optional `Idempotency-Key` header with the same
 format. Invalid keys return HTTP 422. The request fingerprint includes the
-reservation ID and outcome. The same key and outcome replays the original
-response; changing the outcome with
+reservation ID, outcome, and caller reference. The same key and outcome from
+the same caller replays the original response; another caller cannot replay
+it. Changing the outcome with
 that key returns HTTP 409. Without a key, the existing one-checkout-per-
 reservation retry behavior remains in effect.
 
@@ -305,6 +329,7 @@ returns HTTP 201 in the same response shape, with both statuses set to
 
 ```http
 POST /api/payments/33/settle
+X-User-Ref: alice-demo
 Content-Type: application/json
 
 {"outcome":"success"}
@@ -317,7 +342,8 @@ expires first, its pending payment is changed to failed and its booking to
 cancelled; it cannot later confirm. Repeated checkout or settlement returns
 the stored result even if the retry supplies a different outcome. Expired or
 cancelled reservations without an existing checkout return 409; unknown IDs
-return 404. Database write errors return a generic 409.
+return 404. A different non-NULL owner returns 403. Database write errors
+return a generic 409.
 
 ### `GET /api/events/{event_id}/bookings`
 
@@ -349,8 +375,17 @@ records and optional payment details. Example request:
 ```
 
 `limit` is 1–500 (default 100); `offset` defaults to 0. Unknown event returns
-404. This is event-wide history; no authentication or user ownership filtering
-exists.
+404. This is event-wide and unfiltered; it does not require an authenticated
+owner. Use `/api/users/me/bookings` for caller-reference filtering.
+
+### `GET /api/users/me/bookings`
+
+Returns paginated booking records belonging to the caller-supplied
+`X-User-Ref`, newest first, including payment details when present. Example:
+`GET /api/users/me/bookings?limit=100&offset=0` with
+`X-User-Ref: alice-demo`. `limit` is 1–500 (default 100), and `offset` defaults
+to 0. The route name's “me” does not imply authentication; legacy NULL-owner
+rows are not included in this filtered list.
 
 ### `POST /api/bookings/{booking_id}/cancel`
 
@@ -437,14 +472,20 @@ Database unique constraints back up application checks:
 - Unique `payments.booking_id` permits one payment row per booking.
 - `(event_id, seat_number)` prevents repeated seat numbers within an event.
 
+Reservations and bookings have nullable `user_ref` columns. New reservation
+requests persist their required header value; checkout copies it to the
+booking. The migration adds these columns without backfilling legacy rows.
+Ownership is checked inside existing seat-first reservation/checkout lock
+flows, without adding locks. NULL-owner legacy rows remain accessible.
+
 The existing checkout rule permits one attempt per reservation; a failed
 payment is terminal and another attempt requires a new reservation. Explicit
 idempotency responses have a durable `(operation, key)` scope: reservation
 creation and checkout use distinct operation names, and fingerprints include
-the path identifiers and relevant request fields. Since authentication is not
-implemented, keys are global per operation across all callers. Clients should
-generate globally unique keys (UUIDs are suitable) and must not reuse a key for
-another caller's request. A key reused with different logical parameters
+the path identifiers, relevant request fields, and `user_ref`. Since real
+authentication is not implemented, keys remain globally unique per operation.
+Clients should generate globally unique keys (UUIDs are suitable). A key reused
+with different logical parameters or by another caller
 returns HTTP 409. Different keys still pass through seat locks and the existing
 database uniqueness constraints. Concurrent requests with the same key wait
 on the database unique constraint and replay the committed response. The
@@ -462,8 +503,9 @@ does not create an external charge.
 The MariaDB integration test exercises same-seat reservation, duplicate
 checkout, and delayed-settlement concurrency. SQLite tests validate API and transaction behavior but
 cannot establish InnoDB locking behavior. Locks coordinate only code paths
-that follow the same seat-first protocol. There is no authentication or
-reservation ownership check, so this API is not ready for public use. Event
+that follow the same seat-first protocol. There is no authentication: `X-User-Ref`
+is caller-controlled identification, not proof of identity, so it is not a
+security boundary and the API is not ready for public use. Event
 administration, refunds, provider retries, and background expiry are not
 implemented. A small reproducible load smoke test is documented in
 [docs/load-test-results.md](docs/load-test-results.md); it is not a capacity

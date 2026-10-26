@@ -110,7 +110,8 @@ def test_reservation_endpoints_and_expiration_with_sqlite() -> None:
                 await session.commit()
 
             async with AsyncClient(
-                transport=ASGITransport(app=app), base_url="http://test"
+                transport=ASGITransport(app=app), base_url="http://test",
+                headers={"X-User-Ref": "test-user"},
             ) as client:
                 assert (await client.get("/health")).status_code == 200
                 assert (await client.get("/health/db")).status_code == 200

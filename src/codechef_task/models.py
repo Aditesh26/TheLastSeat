@@ -132,12 +132,6 @@ class Reservation(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     event_id: Mapped[int] = mapped_column(Integer, nullable=False)
     seat_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    user_ref: Mapped[str | None] = mapped_column(
-        String(64).with_variant(
-            String(64, collation="utf8mb4_bin"), "mysql"
-        ),
-        nullable=True,
-    )
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default=ReservationStatus.ACTIVE.value
     )
@@ -195,12 +189,6 @@ class Booking(Base):
     event_id: Mapped[int] = mapped_column(Integer, nullable=False)
     seat_id: Mapped[int] = mapped_column(Integer, nullable=False)
     reservation_id: Mapped[int | None] = mapped_column(Integer)
-    user_ref: Mapped[str | None] = mapped_column(
-        String(64).with_variant(
-            String(64, collation="utf8mb4_bin"), "mysql"
-        ),
-        nullable=True,
-    )
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default=BookingStatus.CONFIRMED.value
     )
@@ -226,7 +214,10 @@ class Booking(Base):
 class Payment(Base):
     __tablename__ = "payments"
     __table_args__ = (
-        CheckConstraint("amount > 0", name="ck_payments_amount_positive",),
+        CheckConstraint(
+            "amount > 0",
+            name="ck_payments_amount_positive",
+        ),
         CheckConstraint(
             "status IN ('pending', 'succeeded', 'failed', 'refunded')",
             name="ck_payments_status",
@@ -268,9 +259,7 @@ class IdempotencyRecord(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     operation: Mapped[str] = mapped_column(String(32), nullable=False)
     key: Mapped[str] = mapped_column(
-        String(128).with_variant(
-            String(128, collation="utf8mb4_bin"), "mysql"
-        ),
+        String(128).with_variant(String(128, collation="utf8mb4_bin"), "mysql"),
         nullable=False,
     )
     request_fingerprint: Mapped[str] = mapped_column(CHAR(64), nullable=False)

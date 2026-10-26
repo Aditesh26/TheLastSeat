@@ -81,7 +81,8 @@ def test_checkout_success_failure_replays_expiry_and_rollback() -> None:
                 await session.commit()
 
             async with AsyncClient(
-                transport=ASGITransport(app=app), base_url="http://test"
+                transport=ASGITransport(app=app), base_url="http://test",
+                headers={"X-User-Ref": "test-user"},
             ) as client:
                 success = await client.post(
                     f"/api/reservations/{reservation_ids[0]}/checkout",

@@ -18,7 +18,7 @@ from codechef_task.models import (
     Reservation,
     Seat,
 )
-from codechef_task.migrate import apply_checkout_constraints
+from codechef_task.migrate import apply_checkout_constraints, apply_user_ref_columns
 from codechef_task.schema import initialize_schema
 
 
@@ -33,6 +33,8 @@ def test_concurrent_reservations_are_safe_on_mariadb() -> None:
 
         await initialize_schema(engine)
         await apply_checkout_constraints(engine)
+        await apply_user_ref_columns(engine)
+        await apply_user_ref_columns(engine)
         async with engine.connect() as connection:
             table_engines = dict(
                 (
@@ -50,6 +52,25 @@ def test_concurrent_reservations_are_safe_on_mariadb() -> None:
         assert table_engines.get("seats", "").lower() == "innodb"
         assert table_engines.get("reservations", "").lower() == "innodb"
         assert table_engines.get("idempotency_records", "").lower() == "innodb"
+        async with engine.connect() as connection:
+            owner_columns = {
+                (table, column, nullable, collation)
+                for table, column, nullable, collation in (
+                    await connection.execute(
+                        text(
+                            "SELECT TABLE_NAME, COLUMN_NAME, IS_NULLABLE, COLLATION_NAME "
+                            "FROM information_schema.COLUMNS "
+                            "WHERE TABLE_SCHEMA = DATABASE() "
+                            "AND TABLE_NAME IN ('reservations', 'bookings') "
+                            "AND COLUMN_NAME = 'user_ref'"
+                        )
+                    )
+                ).all()
+            }
+        assert owner_columns == {
+            ("reservations", "user_ref", "YES", "utf8mb4_bin"),
+            ("bookings", "user_ref", "YES", "utf8mb4_bin"),
+        }
         async with engine.connect() as connection:
             key_index_columns = list(
                 (
@@ -132,7 +153,8 @@ def test_concurrent_reservations_are_safe_on_mariadb() -> None:
                 seat_ids = [seat.id for seat in seats]
 
             async with AsyncClient(
-                transport=ASGITransport(app=app), base_url="http://test"
+                transport=ASGITransport(app=app), base_url="http://test",
+                headers={"X-User-Ref": "test-user"},
             ) as client:
                 same_seat = await asyncio.gather(
                     client.post(

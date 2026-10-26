@@ -42,7 +42,8 @@ def test_seat_status_booking_history_and_confirmed_booking_cancellation() -> Non
                 await session.commit()
 
             async with AsyncClient(
-                transport=ASGITransport(app=app), base_url="http://test"
+                transport=ASGITransport(app=app), base_url="http://test",
+                headers={"X-User-Ref": "test-user"},
             ) as client:
                 initial = await client.get(f"/api/events/{event_id}/seats")
                 assert initial.status_code == 200
@@ -99,6 +100,7 @@ def test_seat_status_booking_history_and_confirmed_booking_cancellation() -> Non
                 assert history.status_code == 200
                 assert len(history.json()["items"]) == 1
                 booking = history.json()["items"][0]
+                assert "user_ref" not in booking
                 assert booking["status"] == "confirmed"
                 assert booking["payment"]["status"] == "succeeded"
                 assert booking["payment"]["amount"] == "12.00"

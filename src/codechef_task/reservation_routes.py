@@ -30,6 +30,7 @@ from codechef_task.models import (
     ReservationStatus,
     Seat,
 )
+from codechef_task.user_identity import ensure_owner, require_user_ref
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -81,10 +82,11 @@ async def _expire_if_elapsed(
         await _fail_pending_checkout(session, reservation, now)
         await session.flush()
         logger.info(
-            "reservation.expired reservation_id=%s event_id=%s seat_id=%s",
+            "reservation.expired reservation_id=%s event_id=%s seat_id=%s user_ref=%s",
             reservation.id,
             reservation.event_id,
             reservation.seat_id,
+            reservation.user_ref,
         )
         return True
     return False
@@ -116,11 +118,11 @@ async def _fail_pending_checkout(
 
 async def _read_reservation_location(
     session: AsyncSession, reservation_id: int
-) -> tuple[int, int]:
+) -> tuple[int, int, str | None]:
     """Find immutable seat coordinates before starting the lifecycle transaction."""
     location = (
         await session.execute(
-            select(Reservation.event_id, Reservation.seat_id).where(
+            select(Reservation.event_id, Reservation.seat_id, Reservation.user_ref).where(
                 Reservation.id == reservation_id
             )
         )
@@ -167,10 +169,13 @@ async def create_reservation(
     event_id: int = Path(gt=0),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     session: AsyncSession = Depends(get_db_session),
+    user_ref: str = Depends(require_user_ref),
 ) -> ReservationRead:
     """Temporarily hold an available seat, serializing attempts on its seat row."""
     validate_idempotency_key(idempotency_key)
-    fingerprint = request_fingerprint(event_id=event_id, seat_id=payload.seat_id)
+    fingerprint = request_fingerprint(
+        event_id=event_id, seat_id=payload.seat_id, user_ref=user_ref
+    )
     response: ReservationRead | None = None
     cached_response: CachedResponse | None = None
     idempotency_record = None
@@ -241,6 +246,7 @@ async def create_reservation(
                 reservation = Reservation(
                     event_id=event_id,
                     seat_id=seat.id,
+                    user_ref=user_ref,
                     status=ReservationStatus.ACTIVE.value,
                     created_at=now,
                     updated_at=now,
@@ -282,10 +288,11 @@ async def create_reservation(
         raise HTTPException(status_code=409, detail=conflict)
     assert response is not None
     logger.info(
-        "reservation.created reservation_id=%s event_id=%s seat_id=%s expires_at=%s",
+        "reservation.created reservation_id=%s event_id=%s seat_id=%s user_ref=%s expires_at=%s",
         response.id,
         response.event_id,
         response.seat_id,
+        user_ref,
         response.expires_at.isoformat(),
     )
     return response
@@ -295,13 +302,15 @@ async def create_reservation(
 async def get_reservation(
     reservation_id: int = Path(gt=0),
     session: AsyncSession = Depends(get_db_session),
+    user_ref: str = Depends(require_user_ref),
 ) -> ReservationRead:
     """Return current status and persist expiration when the hold has elapsed."""
-    event_id, seat_id = await _read_reservation_location(session, reservation_id)
+    event_id, seat_id, _ = await _read_reservation_location(session, reservation_id)
     async with session.begin():
         reservation = await _lock_reservation_and_seat(
             session, reservation_id, event_id, seat_id
         )
+        ensure_owner(reservation.user_ref, user_ref)
         await _expire_if_elapsed(session, reservation, datetime.now(UTC))
         return _reservation_response(reservation)
 
@@ -310,15 +319,17 @@ async def get_reservation(
 async def cancel_reservation(
     reservation_id: int = Path(gt=0),
     session: AsyncSession = Depends(get_db_session),
+    user_ref: str = Depends(require_user_ref),
 ) -> ReservationRead:
     """Cancel a current hold; terminal reservation states cannot be reactivated."""
-    event_id, seat_id = await _read_reservation_location(session, reservation_id)
+    event_id, seat_id, _ = await _read_reservation_location(session, reservation_id)
     response: ReservationRead | None = None
     conflict: str | None = None
     async with session.begin():
         reservation = await _lock_reservation_and_seat(
             session, reservation_id, event_id, seat_id
         )
+        ensure_owner(reservation.user_ref, user_ref)
         now = datetime.now(UTC)
         expired = await _expire_if_elapsed(session, reservation, now)
         if expired:
@@ -336,9 +347,10 @@ async def cancel_reservation(
         raise HTTPException(status_code=409, detail=conflict)
     assert response is not None
     logger.info(
-        "reservation.cancelled reservation_id=%s event_id=%s seat_id=%s",
+        "reservation.cancelled reservation_id=%s event_id=%s seat_id=%s user_ref=%s",
         response.id,
         response.event_id,
         response.seat_id,
+        reservation.user_ref,
     )
     return response

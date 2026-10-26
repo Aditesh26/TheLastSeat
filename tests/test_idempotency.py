@@ -72,7 +72,8 @@ def test_idempotency_keys_replay_validate_and_rollback_atomically() -> None:
                 await session.commit()
 
             async with AsyncClient(
-                transport=ASGITransport(app=app), base_url="http://test"
+                transport=ASGITransport(app=app), base_url="http://test",
+                headers={"X-User-Ref": "test-user"},
             ) as client:
                 reservation_url = f"/api/events/{event_id}/reservations"
                 headers = {"Idempotency-Key": "reserve-seat-1"}

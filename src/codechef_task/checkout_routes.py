@@ -35,6 +35,7 @@ from codechef_task.reservation_routes import (
     _fail_pending_checkout,
     _read_reservation_location,
 )
+from codechef_task.user_identity import ensure_owner, require_user_ref
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -87,13 +88,17 @@ async def checkout_reservation(
     reservation_id: int = Path(gt=0),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     session: AsyncSession = Depends(get_db_session),
+    user_ref: str = Depends(require_user_ref),
 ) -> CheckoutRead:
     """Convert an active hold and record one simulated payment atomically."""
     validate_idempotency_key(idempotency_key)
     fingerprint = request_fingerprint(
-        reservation_id=reservation_id, outcome=payload.outcome
+        reservation_id=reservation_id, outcome=payload.outcome, user_ref=user_ref
     )
-    event_id, seat_id = await _read_reservation_location(session, reservation_id)
+    event_id, seat_id, stored_user_ref = await _read_reservation_location(
+        session, reservation_id
+    )
+    ensure_owner(stored_user_ref, user_ref)
     result: CheckoutRead | None = None
     cached_response: CachedResponse | None = None
     idempotency_record = None
@@ -126,6 +131,7 @@ async def checkout_reservation(
             )
             if reservation is None:
                 raise HTTPException(status_code=404, detail="Reservation not found")
+            ensure_owner(reservation.user_ref, user_ref)
 
             now = datetime.now(UTC)
             expired_now = await _expire_if_elapsed(session, reservation, now)
@@ -165,6 +171,7 @@ async def checkout_reservation(
                         event_id=reservation.event_id,
                         seat_id=reservation.seat_id,
                         reservation_id=reservation.id,
+                        user_ref=reservation.user_ref,
                         status=(
                             BookingStatus.CONFIRMED.value
                             if success
@@ -236,11 +243,12 @@ async def checkout_reservation(
     if replayed:
         response.status_code = status.HTTP_200_OK
     logger.info(
-        "checkout.completed reservation_id=%s booking_id=%s payment_id=%s "
+        "checkout.completed reservation_id=%s booking_id=%s payment_id=%s user_ref=%s "
         "booking_status=%s payment_status=%s requested_outcome=%s",
         result.reservation_id,
         result.booking_id,
         result.payment_id,
+        user_ref,
         result.booking_status.value,
         result.payment_status.value,
         payload.outcome,
@@ -255,6 +263,7 @@ async def settle_delayed_payment(
     payload: SettlementRequest,
     payment_id: int = Path(gt=0),
     session: AsyncSession = Depends(get_db_session),
+    user_ref: str = Depends(require_user_ref),
 ) -> CheckoutRead:
     """Settle a persisted pending payment without a worker or sleeping request."""
     location = (
@@ -306,6 +315,8 @@ async def settle_delayed_payment(
             )
             if booking is None or payment is None:
                 raise HTTPException(status_code=404, detail="Payment not found")
+            ensure_owner(reservation.user_ref, user_ref)
+            ensure_owner(booking.user_ref, user_ref)
 
             if payment.status != PaymentStatus.PENDING.value:
                 result = _checkout_response(booking, payment)
@@ -339,11 +350,12 @@ async def settle_delayed_payment(
         raise HTTPException(status_code=409, detail=conflict)
     assert result is not None
     logger.info(
-        "payment.settled payment_id=%s booking_id=%s reservation_id=%s "
+        "payment.settled payment_id=%s booking_id=%s reservation_id=%s user_ref=%s "
         "booking_status=%s payment_status=%s requested_outcome=%s",
         result.payment_id,
         result.booking_id,
         result.reservation_id,
+        user_ref,
         result.booking_status.value,
         result.payment_status.value,
         payload.outcome,

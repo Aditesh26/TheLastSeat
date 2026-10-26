@@ -25,6 +25,7 @@ from codechef_task.reservation_routes import (
     _lock_reservation_and_seat,
     _read_reservation_location,
 )
+from codechef_task.user_identity import ensure_owner, require_user_ref
 
 router = APIRouter()
 
@@ -64,6 +65,10 @@ class BookingHistoryItem(BaseModel):
 
 class BookingHistoryRead(BaseModel):
     event_id: int
+    items: list[BookingHistoryItem]
+
+
+class UserBookingHistoryRead(BaseModel):
     items: list[BookingHistoryItem]
 
 
@@ -117,7 +122,7 @@ async def list_event_seats(
     # Reuse the reservation endpoints' seat-first lock order for each due hold.
     for reservation_id in expired_ids:
         try:
-            location_event_id, seat_id = await _read_reservation_location(
+            location_event_id, seat_id, _ = await _read_reservation_location(
                 session, reservation_id
             )
         except HTTPException as exc:
@@ -202,6 +207,29 @@ async def list_event_bookings(
     )
 
 
+@router.get("/api/users/me/bookings", response_model=UserBookingHistoryRead)
+async def list_user_bookings(
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_db_session),
+    user_ref: str = Depends(require_user_ref),
+) -> UserBookingHistoryRead:
+    """Return paginated booking/payment history for the identified caller."""
+    rows = (
+        await session.execute(
+            select(Booking, Payment)
+            .outerjoin(Payment, Payment.booking_id == Booking.id)
+            .where(Booking.user_ref == user_ref)
+            .order_by(Booking.created_at.desc(), Booking.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return UserBookingHistoryRead(
+        items=[_booking_item(booking, payment) for booking, payment in rows]
+    )
+
+
 async def _read_booking_location(
     session: AsyncSession, booking_id: int
 ) -> tuple[int, int]:
@@ -222,6 +250,7 @@ async def _read_booking_location(
 async def cancel_confirmed_booking(
     booking_id: int = Path(gt=0),
     session: AsyncSession = Depends(get_db_session),
+    user_ref: str = Depends(require_user_ref),
 ) -> BookingHistoryItem:
     """Cancel a confirmed booking while preserving its historical records."""
     event_id, seat_id = await _read_booking_location(session, booking_id)
@@ -240,6 +269,7 @@ async def cancel_confirmed_booking(
         )
         if booking is None:
             raise HTTPException(status_code=404, detail="Booking not found")
+        ensure_owner(booking.user_ref, user_ref)
         payment = await session.scalar(
             select(Payment).where(Payment.booking_id == booking.id)
         )

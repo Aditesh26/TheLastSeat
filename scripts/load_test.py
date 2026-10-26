@@ -285,6 +285,7 @@ async def run(args: argparse.Namespace) -> int:
         event_id, slug, seat_ids = await create_test_event(args.seats)
         async with httpx.AsyncClient(
             base_url=args.base_url,
+            headers={"X-User-Ref": "load-test"},
             timeout=httpx.Timeout(30),
             limits=httpx.Limits(max_connections=args.concurrency),
             trust_env=False,

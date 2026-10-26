@@ -34,6 +34,7 @@ erDiagram
         int id PK
         int event_id FK
         int seat_id FK
+        string user_ref "nullable caller identifier"
         string status
         datetime expires_at
         int active_seat_id "generated while active"
@@ -45,6 +46,7 @@ erDiagram
         int event_id FK
         int seat_id FK
         int reservation_id FK "nullable, unique"
+        string user_ref "nullable caller identifier"
         string status "pending, confirmed, cancelled"
         decimal amount_paid
         char currency
@@ -84,3 +86,9 @@ or expiry. `IdempotencyRecord` is independent of those domain foreign keys;
 `uq_idempotency_operation_key` uniquely scopes the client key by operation.
 Its fingerprint and response are committed in the same transaction as the
 associated successful reservation or checkout.
+
+`user_ref` is nullable on reservations and bookings so pre-migration rows
+remain valid. New API reservations store the required `X-User-Ref`, and
+checkout copies it to the booking. This is caller-supplied identification for
+ownership filtering, not authentication. MariaDB stores it with a binary
+collation so user-history matching is case-sensitive.

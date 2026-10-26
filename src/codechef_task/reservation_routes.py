@@ -1,6 +1,7 @@
 # HTTP endpoints for the temporary reservation lifecycle.
 
 from datetime import UTC, datetime, timedelta
+import logging
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Response, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -31,6 +32,7 @@ from codechef_task.models import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class ReservationCreate(BaseModel):
@@ -78,6 +80,12 @@ async def _expire_if_elapsed(
         reservation.updated_at = now
         await _fail_pending_checkout(session, reservation, now)
         await session.flush()
+        logger.info(
+            "reservation.expired reservation_id=%s event_id=%s seat_id=%s",
+            reservation.id,
+            reservation.event_id,
+            reservation.seat_id,
+        )
         return True
     return False
 
@@ -273,6 +281,13 @@ async def create_reservation(
     if conflict is not None:
         raise HTTPException(status_code=409, detail=conflict)
     assert response is not None
+    logger.info(
+        "reservation.created reservation_id=%s event_id=%s seat_id=%s expires_at=%s",
+        response.id,
+        response.event_id,
+        response.seat_id,
+        response.expires_at.isoformat(),
+    )
     return response
 
 
@@ -320,4 +335,10 @@ async def cancel_reservation(
     if conflict is not None:
         raise HTTPException(status_code=409, detail=conflict)
     assert response is not None
+    logger.info(
+        "reservation.cancelled reservation_id=%s event_id=%s seat_id=%s",
+        response.id,
+        response.event_id,
+        response.seat_id,
+    )
     return response

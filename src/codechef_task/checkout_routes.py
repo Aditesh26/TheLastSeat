@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 from decimal import Decimal
+import logging
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Response, status
@@ -36,6 +37,7 @@ from codechef_task.reservation_routes import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class CheckoutRequest(BaseModel):
@@ -233,6 +235,16 @@ async def checkout_reservation(
     assert result is not None
     if replayed:
         response.status_code = status.HTTP_200_OK
+    logger.info(
+        "checkout.completed reservation_id=%s booking_id=%s payment_id=%s "
+        "booking_status=%s payment_status=%s requested_outcome=%s",
+        result.reservation_id,
+        result.booking_id,
+        result.payment_id,
+        result.booking_status.value,
+        result.payment_status.value,
+        payload.outcome,
+    )
     return result
 
 
@@ -326,4 +338,14 @@ async def settle_delayed_payment(
     if conflict is not None:
         raise HTTPException(status_code=409, detail=conflict)
     assert result is not None
+    logger.info(
+        "payment.settled payment_id=%s booking_id=%s reservation_id=%s "
+        "booking_status=%s payment_status=%s requested_outcome=%s",
+        result.payment_id,
+        result.booking_id,
+        result.reservation_id,
+        result.booking_status.value,
+        result.payment_status.value,
+        payload.outcome,
+    )
     return result

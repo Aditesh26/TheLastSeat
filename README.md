@@ -57,6 +57,7 @@ The application reads these names through Pydantic Settings:
 | `DB_USER` | Database user | Empty; configure a user |
 | `DB_PASSWORD` | Database password | Empty; configure a password |
 | `RESERVATION_HOLD_SECONDS` | Hold duration | `300` |
+| `LOG_LEVEL` | Application log threshold (`DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`) | `INFO` |
 
 The `.env.example` also has Compose-only variables: `MARIADB_ROOT_PASSWORD`
 sets the container database root password, and `DOCKER_DB_PORT` selects the
@@ -163,6 +164,26 @@ Request: `GET /health/db`. When the database is unavailable, it returns HTTP
 ```
 
 Credentials and internal exception details are not returned.
+
+### Request IDs and logs
+
+The API accepts an `X-Request-ID` header containing 1–128 ASCII letters,
+digits, periods, underscores, colons, or hyphens. Missing or invalid values
+are replaced with a generated UUID. The response always includes the chosen
+value in `X-Request-ID`. Each request produces one access log with method,
+path (without query parameters), status, and duration. The request ID is
+included in log records, along with lifecycle entries for reservation
+creation, expiry and cancellation, checkout, and delayed-payment settlement.
+Unexpected exceptions include a traceback in server logs and return a generic
+HTTP 500 response; expected HTTP errors retain their normal status and detail.
+Request bodies, query strings, credentials, database URLs, tokens, and payment
+secrets are not included in these logs.
+
+Logging uses Python's standard `logging` module and writes to the process
+console. Set `LOG_LEVEL=DEBUG` (or another listed level) in the local `.env`
+to change the threshold. Docker Compose passes the same variable to the API
+container and defaults it to `INFO`. Lower thresholds can produce more output;
+use `INFO` for normal operation.
 
 ### `POST /api/events/{event_id}/reservations`
 

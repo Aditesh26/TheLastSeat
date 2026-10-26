@@ -40,6 +40,7 @@ async def _make_test_data(session_factory, count: int = 4):
             Reservation(
                 event_id=event.id,
                 seat_id=seat.id,
+                user_ref="24BCE0001",
                 expires_at=datetime.now(UTC) + timedelta(minutes=5),
             )
             for seat in seats
@@ -66,7 +67,7 @@ def test_delayed_payment_success_failure_expiry_cancel_and_replay() -> None:
             event_id, reservation_ids = await _make_test_data(session_factory)
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
-                headers={"X-User-Ref": "test-user"},
+                headers={"X-User-Ref": "24BCE0001"},
             ) as client:
                 delayed = await client.post(
                     f"/api/reservations/{reservation_ids[0]}/checkout",
@@ -201,7 +202,7 @@ def test_delayed_settlement_rolls_back_if_payment_update_fails() -> None:
             _, reservation_ids = await _make_test_data(session_factory, count=1)
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
-                headers={"X-User-Ref": "test-user"},
+                headers={"X-User-Ref": "24BCE0001"},
             ) as client:
                 delayed = await client.post(
                     f"/api/reservations/{reservation_ids[0]}/checkout",

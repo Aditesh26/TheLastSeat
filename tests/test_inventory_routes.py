@@ -43,7 +43,7 @@ def test_seat_status_booking_history_and_confirmed_booking_cancellation() -> Non
 
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
-                headers={"X-User-Ref": "test-user"},
+                headers={"X-User-Ref": "24BCE0001"},
             ) as client:
                 initial = await client.get(f"/api/events/{event_id}/seats")
                 assert initial.status_code == 200
@@ -97,6 +97,9 @@ def test_seat_status_booking_history_and_confirmed_booking_cancellation() -> Non
                 assert after_booking.json()["seats"][2]["status"] == "booked"
 
                 history = await client.get(f"/api/events/{event_id}/bookings")
+                assert history.status_code == 403
+
+                history = await client.get("/api/users/me/bookings")
                 assert history.status_code == 200
                 assert len(history.json()["items"]) == 1
                 booking = history.json()["items"][0]
@@ -121,9 +124,7 @@ def test_seat_status_booking_history_and_confirmed_booking_cancellation() -> Non
                     f"/api/events/{event_id}/seats"
                 )
                 assert after_booking_cancel.json()["seats"][2]["status"] == "available"
-                history_after_cancel = await client.get(
-                    f"/api/events/{event_id}/bookings"
-                )
+                history_after_cancel = await client.get("/api/users/me/bookings")
                 assert history_after_cancel.json()["items"][0]["status"] == "cancelled"
 
                 reallocated = await client.post(

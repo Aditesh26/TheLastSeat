@@ -50,27 +50,32 @@ def test_checkout_success_failure_replays_expiry_and_rollback() -> None:
                     Reservation(
                         event_id=event.id,
                         seat_id=seats[0].id,
+                        user_ref="24BCE0001",
                         expires_at=now + timedelta(minutes=5),
                     ),
                     Reservation(
                         event_id=event.id,
                         seat_id=seats[1].id,
+                        user_ref="24BCE0001",
                         expires_at=now + timedelta(minutes=5),
                     ),
                     Reservation(
                         event_id=event.id,
                         seat_id=seats[2].id,
+                        user_ref="24BCE0001",
                         expires_at=now - timedelta(seconds=1),
                     ),
                     Reservation(
                         event_id=event.id,
                         seat_id=seats[3].id,
+                        user_ref="24BCE0001",
                         status=ReservationStatus.CANCELLED.value,
                         expires_at=now + timedelta(minutes=5),
                     ),
                     Reservation(
                         event_id=event.id,
                         seat_id=seats[4].id,
+                        user_ref="24BCE0001",
                         expires_at=now + timedelta(minutes=5),
                     ),
                 ]
@@ -82,7 +87,7 @@ def test_checkout_success_failure_replays_expiry_and_rollback() -> None:
 
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
-                headers={"X-User-Ref": "test-user"},
+                headers={"X-User-Ref": "24BCE0001"},
             ) as client:
                 success = await client.post(
                     f"/api/reservations/{reservation_ids[0]}/checkout",

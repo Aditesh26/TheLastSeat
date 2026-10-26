@@ -110,6 +110,7 @@ def test_concurrent_reservations_are_safe_on_mariadb() -> None:
                 expired = Reservation(
                     event_id=event.id,
                     seat_id=seats[3].id,
+                    user_ref="24BCE0001",
                     status="active",
                     created_at=old_time - timedelta(minutes=5),
                     updated_at=old_time - timedelta(minutes=5),
@@ -118,6 +119,7 @@ def test_concurrent_reservations_are_safe_on_mariadb() -> None:
                 active_to_cancel = Reservation(
                     event_id=event.id,
                     seat_id=seats[5].id,
+                    user_ref="24BCE0001",
                     status="active",
                     created_at=now,
                     updated_at=now,
@@ -126,6 +128,7 @@ def test_concurrent_reservations_are_safe_on_mariadb() -> None:
                 expired_to_race = Reservation(
                     event_id=event.id,
                     seat_id=seats[6].id,
+                    user_ref="24BCE0001",
                     status="active",
                     created_at=old_time - timedelta(minutes=5),
                     updated_at=old_time - timedelta(minutes=5),
@@ -154,7 +157,7 @@ def test_concurrent_reservations_are_safe_on_mariadb() -> None:
 
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
-                headers={"X-User-Ref": "test-user"},
+                headers={"X-User-Ref": "24BCE0001"},
             ) as client:
                 same_seat = await asyncio.gather(
                     client.post(

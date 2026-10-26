@@ -91,6 +91,7 @@ def test_reservation_endpoints_and_expiration_with_sqlite() -> None:
                 expired_for_reclaim = Reservation(
                     event_id=open_event.id,
                     seat_id=open_seat_ids[4],
+                    user_ref="24BCE0001",
                     status=ReservationStatus.ACTIVE.value,
                     created_at=old_time - timedelta(minutes=5),
                     updated_at=old_time - timedelta(minutes=5),
@@ -99,6 +100,7 @@ def test_reservation_endpoints_and_expiration_with_sqlite() -> None:
                 expired_for_read = Reservation(
                     event_id=open_event.id,
                     seat_id=open_seat_ids[5],
+                    user_ref="24BCE0001",
                     status=ReservationStatus.ACTIVE.value,
                     created_at=old_time - timedelta(minutes=5),
                     updated_at=old_time - timedelta(minutes=5),
@@ -111,7 +113,7 @@ def test_reservation_endpoints_and_expiration_with_sqlite() -> None:
 
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
-                headers={"X-User-Ref": "test-user"},
+                headers={"X-User-Ref": "24BCE0001"},
             ) as client:
                 assert (await client.get("/health")).status_code == 200
                 assert (await client.get("/health/db")).status_code == 200

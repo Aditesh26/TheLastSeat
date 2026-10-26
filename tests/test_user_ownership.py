@@ -44,7 +44,7 @@ def test_user_header_ownership_booking_history_idempotency_and_legacy_rows() -> 
                 )
                 session.add(event)
                 await session.flush()
-                seats = [Seat(event_id=event.id, seat_number=n) for n in range(1, 9)]
+                seats = [Seat(event_id=event.id, seat_number=n) for n in range(1, 10)]
                 session.add_all(seats)
                 await session.flush()
                 now = datetime.now(UTC)
@@ -57,14 +57,14 @@ def test_user_header_ownership_booking_history_idempotency_and_legacy_rows() -> 
                         expires_at=now + timedelta(minutes=5),
                     )
                     for i, owner, state in (
-                        (0, "alice", ReservationStatus.ACTIVE.value),
-                        (1, "bob", ReservationStatus.ACTIVE.value),
+                        (0, "24BCE1234", ReservationStatus.ACTIVE.value),
+                        (1, "24BCE5678", ReservationStatus.ACTIVE.value),
                         (2, None, ReservationStatus.ACTIVE.value),
-                        (3, "alice", ReservationStatus.ACTIVE.value),
+                        (3, "24BCE1234", ReservationStatus.ACTIVE.value),
                         (4, None, ReservationStatus.ACTIVE.value),
-                        (5, "alice", ReservationStatus.CONVERTED.value),
-                        (6, "bob", ReservationStatus.CONVERTED.value),
-                        (7, "Alice", ReservationStatus.CONVERTED.value),
+                        (5, "24BCE1234", ReservationStatus.CONVERTED.value),
+                        (6, "24BCE5678", ReservationStatus.CONVERTED.value),
+                        (7, "24BCE9999", ReservationStatus.CONVERTED.value),
                     )
                 ]
                 session.add_all(holds)
@@ -81,7 +81,7 @@ def test_user_header_ownership_booking_history_idempotency_and_legacy_rows() -> 
                     event_id=event.id,
                     seat_id=seats[5].id,
                     reservation_id=holds[5].id,
-                    user_ref="alice",
+                    user_ref="24BCE1234",
                     status=BookingStatus.CONFIRMED.value,
                     amount_paid=Decimal("15.00"),
                     currency="USD",
@@ -90,7 +90,7 @@ def test_user_header_ownership_booking_history_idempotency_and_legacy_rows() -> 
                     event_id=event.id,
                     seat_id=seats[6].id,
                     reservation_id=holds[6].id,
-                    user_ref="bob",
+                    user_ref="24BCE5678",
                     status=BookingStatus.CONFIRMED.value,
                     amount_paid=Decimal("15.00"),
                     currency="USD",
@@ -99,7 +99,7 @@ def test_user_header_ownership_booking_history_idempotency_and_legacy_rows() -> 
                     event_id=event.id,
                     seat_id=seats[7].id,
                     reservation_id=holds[7].id,
-                    user_ref="Alice",
+                    user_ref="24BCE9999",
                     status=BookingStatus.CANCELLED.value,
                     amount_paid=Decimal("0.00"),
                     currency="USD",
@@ -108,7 +108,7 @@ def test_user_header_ownership_booking_history_idempotency_and_legacy_rows() -> 
                     event_id=event.id,
                     seat_id=seats[3].id,
                     reservation_id=holds[3].id,
-                    user_ref="alice",
+                    user_ref="24BCE1234",
                     status=BookingStatus.PENDING.value,
                     amount_paid=Decimal("0.00"),
                     currency="USD",
@@ -155,6 +155,7 @@ def test_user_header_ownership_booking_history_idempotency_and_legacy_rows() -> 
                 )
                 await session.commit()
                 alice_confirmed_booking_id = alice_confirmed.id
+                legacy_pending_booking_id = legacy_pending.id
                 event_id = event.id
                 seat_ids = [seat.id for seat in seats]
                 alice_pending_payment_id = await session.scalar(
@@ -166,7 +167,7 @@ def test_user_header_ownership_booking_history_idempotency_and_legacy_rows() -> 
 
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
-                headers={"X-User-Ref": "alice"},
+                headers={"X-User-Ref": "24bce1234"},
             ) as client:
                 missing_request = client.build_request(
                     "GET", f"/api/reservations/{alice_reservation_id}"
@@ -214,7 +215,7 @@ def test_user_header_ownership_booking_history_idempotency_and_legacy_rows() -> 
                         method,
                         path,
                         json=body,
-                        headers={"X-User-Ref": "bob"},
+                        headers={"X-User-Ref": "24BCE5678"},
                     )
                     assert denied.status_code == 403
 
@@ -222,6 +223,27 @@ def test_user_header_ownership_booking_history_idempotency_and_legacy_rows() -> 
                     f"/api/reservations/{alice_reservation_id}"
                 )
                 assert own_hold.status_code == 200
+                null_owner_get = await client.get(
+                    f"/api/reservations/{legacy_reservation_id}"
+                )
+                null_owner_delete = await client.delete(
+                    f"/api/reservations/{legacy_reservation_id}"
+                )
+                assert null_owner_get.status_code == 403
+                assert null_owner_delete.status_code == 403
+
+                normalized_creation = await client.post(
+                    f"/api/events/{event_id}/reservations",
+                    json={"seat_id": seat_ids[8]},
+                    headers={"X-User-Ref": " 24bce1234 "},
+                )
+                assert normalized_creation.status_code == 201
+                async with session_factory() as session:
+                    assert await session.scalar(
+                        select(Reservation.user_ref).where(
+                            Reservation.id == normalized_creation.json()["id"]
+                        )
+                    ) == "24BCE1234"
 
                 own_history = await client.get("/api/users/me/bookings")
                 assert own_history.status_code == 200
@@ -243,7 +265,7 @@ def test_user_header_ownership_booking_history_idempotency_and_legacy_rows() -> 
                 second_reservation = await client.post(
                     reservation_url,
                     json={"seat_id": seat_ids[7]},
-                    headers={"X-User-Ref": "bob", "Idempotency-Key": reserve_key},
+                    headers={"X-User-Ref": "24BCE5678", "Idempotency-Key": reserve_key},
                 )
                 assert first_reservation.status_code == 201
                 assert second_reservation.status_code == 409
@@ -258,7 +280,7 @@ def test_user_header_ownership_booking_history_idempotency_and_legacy_rows() -> 
                             Booking.id == created_checkout.json()["booking_id"]
                         )
                     )
-                assert created_booking_owner == "alice"
+                assert created_booking_owner == "24BCE1234"
 
                 first_checkout = await client.post(
                     f"/api/reservations/{alice_reservation_id}/checkout",
@@ -269,7 +291,7 @@ def test_user_header_ownership_booking_history_idempotency_and_legacy_rows() -> 
                     f"/api/reservations/{bob_reservation_id}/checkout",
                     json={"outcome": "success"},
                     headers={
-                        "X-User-Ref": "bob",
+                        "X-User-Ref": "24BCE5678",
                         "Idempotency-Key": "shared-checkout-key",
                     },
                 )
@@ -277,7 +299,7 @@ def test_user_header_ownership_booking_history_idempotency_and_legacy_rows() -> 
                 assert cross_user_checkout.status_code == 409
                 wrong_user_booking_cancel = await client.post(
                     f"/api/bookings/{created_checkout.json()['booking_id']}/cancel",
-                    headers={"X-User-Ref": "bob"},
+                    headers={"X-User-Ref": "24BCE5678"},
                 )
                 assert wrong_user_booking_cancel.status_code == 403
 
@@ -288,18 +310,18 @@ def test_user_header_ownership_booking_history_idempotency_and_legacy_rows() -> 
                 legacy_hold = await client.get(
                     f"/api/reservations/{legacy_reservation_id}"
                 )
-                assert settled.status_code == 200
-                assert legacy_hold.status_code == 200
+                assert settled.status_code == 403
+                assert legacy_hold.status_code == 403
                 legacy_booking_cancel = await client.post(
-                    f"/api/bookings/{settled.json()['booking_id']}/cancel"
+                    f"/api/bookings/{legacy_pending_booking_id}/cancel"
                 )
-                assert legacy_booking_cancel.status_code == 200
+                assert legacy_booking_cancel.status_code == 403
 
                 legacy_checkout = await client.post(
                     f"/api/reservations/{legacy_reservation_id}/checkout",
                     json={"outcome": "success"},
                 )
-                assert legacy_checkout.status_code == 201
+                assert legacy_checkout.status_code == 403
         finally:
             app.dependency_overrides.clear()
             await test_engine.dispose()

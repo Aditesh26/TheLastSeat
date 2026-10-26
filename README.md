@@ -193,13 +193,15 @@ use `INFO` for normal operation.
 ### Caller reference and ownership
 
 Reservation creation, reservation retrieval/cancellation, checkout, delayed
-payment settlement, and `GET /api/users/me/bookings` require `X-User-Ref`.
-Values must contain 1–64 ASCII letters, digits, periods, underscores, colons,
-or hyphens; missing or invalid values return HTTP 422. This caller-supplied
-value supports lightweight ownership filtering only; it is **not
-authentication**. A different non-NULL stored owner returns HTTP 403. Legacy
-reservations and bookings with NULL ownership remain accessible to any caller
-with a valid header. Owner comparisons are exact and case-sensitive.
+payment settlement, confirmed-booking cancellation, and
+`GET /api/users/me/bookings` require `X-User-Ref`. It represents a college
+registration number, for example `24BCE1234`. The API trims surrounding
+whitespace, converts letters to uppercase, then accepts 6–20 ASCII letters or
+digits; missing or malformed values return HTTP 422. This is a simulated caller
+identifier, **not authentication**: clients can claim another student's
+registration number, so these checks are not a security boundary. A mismatched
+owner, or a legacy row whose owner is NULL, returns HTTP 403. NULL-owner records
+remain unassigned and are never claimed or backfilled automatically.
 
 ### `POST /api/events/{event_id}/reservations`
 
@@ -207,7 +209,7 @@ Creates a temporary hold for an available seat in an open event:
 
 ```http
 POST /api/events/1/reservations
-X-User-Ref: alice-demo
+X-User-Ref: 24BCE1234
 Content-Type: application/json
 
 {"seat_id":42}
@@ -242,7 +244,7 @@ request):
 
 ```powershell
 $headers = @{
-  "X-User-Ref" = "alice-demo"
+  "X-User-Ref" = "24BCE1234"
   "Idempotency-Key" = [guid]::NewGuid().ToString()
 }
 Invoke-RestMethod -Method Post `
@@ -275,7 +277,7 @@ request can still lose a race and return 409. Unknown event returns 404.
 
 Example request: `GET /api/reservations/17`. Returns HTTP 200 and the
 reservation shape shown in the creation example, lazily persisting `expired`
-when the hold deadline has passed. A different non-NULL owner returns 403;
+when the hold deadline has passed. A different or NULL owner returns 403;
 unknown reservation returns 404.
 
 ### `DELETE /api/reservations/{reservation_id}`
@@ -284,7 +286,7 @@ Example request: `DELETE /api/reservations/17`. Cancels an active hold and
 returns HTTP 200 with the updated reservation shape shown above (with `status`
 set to `cancelled`). A terminal or expired hold returns 409. Cancellation does
 not delete reservation history.
-A different non-NULL owner returns 403.
+A different or NULL owner returns 403.
 
 ### `POST /api/reservations/{reservation_id}/checkout`
 
@@ -293,7 +295,7 @@ only a simulated outcome; price and currency are loaded from the event:
 
 ```http
 POST /api/reservations/17/checkout
-X-User-Ref: alice-demo
+X-User-Ref: 24BCE1234
 Content-Type: application/json
 
 {"outcome":"success"}
@@ -329,7 +331,7 @@ returns HTTP 201 in the same response shape, with both statuses set to
 
 ```http
 POST /api/payments/33/settle
-X-User-Ref: alice-demo
+X-User-Ref: 24BCE1234
 Content-Type: application/json
 
 {"outcome":"success"}
@@ -342,48 +344,24 @@ expires first, its pending payment is changed to failed and its booking to
 cancelled; it cannot later confirm. Repeated checkout or settlement returns
 the stored result even if the retry supplies a different outcome. Expired or
 cancelled reservations without an existing checkout return 409; unknown IDs
-return 404. A different non-NULL owner returns 403. Database write errors
+return 404. A different or NULL owner returns 403. Database write errors
 return a generic 409.
 
 ### `GET /api/events/{event_id}/bookings`
 
-Returns event booking history, newest first, including cancelled and pending
-records and optional payment details. Example request:
-`GET /api/events/1/bookings?limit=100&offset=0`.
-
-```json
-{
-  "event_id": 1,
-  "items": [{
-    "id": 21,
-    "event_id": 1,
-    "seat_id": 14,
-    "reservation_id": 17,
-    "status": "confirmed",
-    "amount_paid": "25.00",
-    "currency": "USD",
-    "created_at": "2026-10-16T12:00:00Z",
-    "payment": {
-      "id": 33,
-      "status": "succeeded",
-      "amount": "25.00",
-      "currency": "USD",
-      "created_at": "2026-10-16T12:00:00Z"
-    }
-  }]
-}
-```
-
-`limit` is 1–500 (default 100); `offset` defaults to 0. Unknown event returns
-404. This is event-wide and unfiltered; it does not require an authenticated
-owner. Use `/api/users/me/bookings` for caller-reference filtering.
+`GET /api/events/1/bookings?limit=100&offset=0` returns HTTP 403 because the
+project has no authenticated staff
+identity with which to authorize access to other students' booking and payment
+details. Use `/api/users/me/bookings` for records matching the supplied
+registration-number reference. That header is caller-controlled and does not
+prove identity.
 
 ### `GET /api/users/me/bookings`
 
-Returns paginated booking records belonging to the caller-supplied
-`X-User-Ref`, newest first, including payment details when present. Example:
+Returns paginated booking records matching the normalized `X-User-Ref`, newest
+first, including payment details when present. Example:
 `GET /api/users/me/bookings?limit=100&offset=0` with
-`X-User-Ref: alice-demo`. `limit` is 1–500 (default 100), and `offset` defaults
+`X-User-Ref: 24BCE1234`. `limit` is 1–500 (default 100), and `offset` defaults
 to 0. The route name's “me” does not imply authentication; legacy NULL-owner
 rows are not included in this filtered list.
 
@@ -472,11 +450,13 @@ Database unique constraints back up application checks:
 - Unique `payments.booking_id` permits one payment row per booking.
 - `(event_id, seat_number)` prevents repeated seat numbers within an event.
 
-Reservations and bookings have nullable `user_ref` columns. New reservation
-requests persist their required header value; checkout copies it to the
-booking. The migration adds these columns without backfilling legacy rows.
+Reservations and bookings have nullable `user_ref` columns in both the ORM
+models and database schema. New reservation requests persist the normalized
+registration-number header value; checkout copies it to the booking. The
+forward migration adds missing columns without backfilling legacy rows.
 Ownership is checked inside existing seat-first reservation/checkout lock
-flows, without adding locks. NULL-owner legacy rows remain accessible.
+flows, without adding locks. NULL-owner legacy rows remain unassigned and
+protected endpoints return 403 for them.
 
 The existing checkout rule permits one attempt per reservation; a failed
 payment is terminal and another attempt requires a new reservation. Explicit
@@ -503,10 +483,11 @@ does not create an external charge.
 The MariaDB integration test exercises same-seat reservation, duplicate
 checkout, and delayed-settlement concurrency. SQLite tests validate API and transaction behavior but
 cannot establish InnoDB locking behavior. Locks coordinate only code paths
-that follow the same seat-first protocol. There is no authentication: `X-User-Ref`
-is caller-controlled identification, not proof of identity, so it is not a
-security boundary and the API is not ready for public use. Event
-administration, refunds, provider retries, and background expiry are not
+that follow the same seat-first protocol. There is no authentication:
+`X-User-Ref` is caller-controlled identification, not proof of identity, so it
+is not a security boundary and the API is not ready for public use. Event-wide
+booking history is disabled until authenticated staff authorization exists.
+Event administration, refunds, provider retries, and background expiry are not
 implemented. A small reproducible load smoke test is documented in
 [docs/load-test-results.md](docs/load-test-results.md); it is not a capacity
 benchmark. No claim of 10,000 concurrent users is made. Scaling beyond a single

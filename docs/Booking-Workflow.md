@@ -67,10 +67,13 @@ untouched holds. Cancelling a confirmed booking preserves the succeeded
 payment record and does not issue a refund.
 
 Reservation creation, reservation reads/cancellation, checkout, settlement,
-and caller booking history require a syntactically valid `X-User-Ref`. For
+confirmed-booking cancellation, and caller booking history require a college
+registration number in `X-User-Ref`. Surrounding whitespace is trimmed and
+letters are uppercased; values must contain 6–20 ASCII letters or digits. For
 owned rows, mutations verify the owner after acquiring their existing seat-
-first locks; no additional row locks are taken. A non-NULL owner mismatch
-returns 403. Legacy rows whose nullable `user_ref` is NULL remain accessible
-with any valid reference. This header is caller-controlled identification,
-not authentication; comparisons are case-sensitive. Idempotency fingerprints include the caller reference,
-so another caller cannot replay a keyed reservation or checkout response.
+first locks; no additional row locks are taken. A mismatch or NULL owner returns
+403. Legacy NULL-owner rows remain unassigned and are never claimed. Event-wide
+booking history is disabled until authenticated staff authorization exists.
+This header is caller-controlled identification, not authentication. Idempotency
+fingerprints include the normalized caller reference, so a different reference
+cannot replay a keyed reservation or checkout response.

@@ -122,9 +122,9 @@ async def _read_reservation_location(
     """Find immutable seat coordinates before starting the lifecycle transaction."""
     location = (
         await session.execute(
-            select(Reservation.event_id, Reservation.seat_id, Reservation.user_ref).where(
-                Reservation.id == reservation_id
-            )
+            select(
+                Reservation.event_id, Reservation.seat_id, Reservation.user_ref
+            ).where(Reservation.id == reservation_id)
         )
     ).one_or_none()
     if location is None:

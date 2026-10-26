@@ -50,16 +50,19 @@ def test_idempotency_keys_replay_validate_and_rollback_atomically() -> None:
                 checkout_reservation = Reservation(
                     event_id=event.id,
                     seat_id=seats[1].id,
+                    user_ref="24BCE0001",
                     expires_at=now + timedelta(minutes=5),
                 )
                 legacy_reservation = Reservation(
                     event_id=event.id,
                     seat_id=seats[2].id,
+                    user_ref="24BCE0001",
                     expires_at=now + timedelta(minutes=5),
                 )
                 rollback_reservation = Reservation(
                     event_id=event.id,
                     seat_id=seats[3].id,
+                    user_ref="24BCE0001",
                     expires_at=now + timedelta(minutes=5),
                 )
                 session.add_all(
@@ -73,7 +76,7 @@ def test_idempotency_keys_replay_validate_and_rollback_atomically() -> None:
 
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
-                headers={"X-User-Ref": "test-user"},
+                headers={"X-User-Ref": "24BCE0001"},
             ) as client:
                 reservation_url = f"/api/events/{event_id}/reservations"
                 headers = {"Idempotency-Key": "reserve-seat-1"}
